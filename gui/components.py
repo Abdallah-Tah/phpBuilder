@@ -1,7 +1,10 @@
 import tkinter as tk
 from tkinter import filedialog, scrolledtext
+from tkinter import ttk
 import threading
 import requests
+import re
+from utils.path_manager import find_7zip_executable
 
 
 class BuilderFrame(tk.Frame):
@@ -34,10 +37,14 @@ class BuilderFrame(tk.Frame):
                        variable=self.var_mysql).pack(anchor="w")
         tk.Checkbutton(option_frame, text="Include SQLSRV (sqlsrv, pdo_sqlsrv)",
                        variable=self.var_sqlsrv).pack(anchor="w")
-        tk.Label(option_frame, text="PHP Version (e.g. 8.3.21):").pack(
+        tk.Label(option_frame, text="PHP Version:").pack(
             anchor="w", pady=(10, 0))
-        tk.Entry(option_frame, textvariable=self.php_version_var,
-                 width=20).pack(anchor="w")
+        self.php_versions = self.fetch_php_versions()
+        if self.php_versions:
+            self.php_version_var.set(self.php_versions[0])
+        self.php_version_dropdown = ttk.Combobox(
+            option_frame, textvariable=self.php_version_var, values=self.php_versions, width=20, state="readonly")
+        self.php_version_dropdown.pack(anchor="w")
 
         # Build button
         tk.Button(self, text="Start Build", command=self._start_build,
@@ -61,7 +68,8 @@ class BuilderFrame(tk.Frame):
             'clone_dir': self.clone_dir.get(),
             'mysql': self.var_mysql.get(),
             'sqlsrv': self.var_sqlsrv.get(),
-            'php_version': self.php_version_var.get().strip()
+            'php_version': self.php_version_var.get().strip(),
+            'seven_zip_exe': self.seven_zip_exe  # Pass the found 7-Zip path to the builder
         }
 
         threading.Thread(
@@ -70,13 +78,22 @@ class BuilderFrame(tk.Frame):
             daemon=True
         ).start()
 
-    def php_version_exists(version):
-        url = f"https://www.php.net/distributions/php-{version}.tar.xz"
+    def fetch_php_versions(self):
+        # Fallback to hardcoded versions if fetching fails or returns empty
         try:
-            resp = requests.head(url, timeout=5)
-            return resp.status_code == 200
+            resp = requests.get("https://www.php.net/downloads", timeout=10)
+            versions = re.findall(
+                r'php-(\\d+\\.\\d+\\.\\d+)\\.tar\\.xz', resp.text)
+            versions = sorted(set(versions), key=lambda v: list(
+                map(int, v.split('.'))), reverse=True)
+            if versions:
+                return versions
         except Exception:
-            return False
+            pass
+        # Default/fallback versions (update as needed)
+        return [
+            "8.4.0", "8.3.8", "8.3.7", "8.3.6", "8.3.5", "8.3.4", "8.3.3", "8.3.2", "8.3.1", "8.3.0"
+        ]
 
     def _validate_inputs(self):
         if not self.clone_dir.get():
@@ -84,10 +101,19 @@ class BuilderFrame(tk.Frame):
             return False
         php_version = self.php_version_var.get().strip()
         if not php_version:
-            self.logger.error("Please enter a PHP version (e.g. 8.3.21)")
+            self.logger.error("Please select a PHP version from the dropdown.")
             return False
-        if not self.php_version_exists(php_version):
+        if php_version not in self.php_versions:
             self.logger.error(
-                f"PHP version {php_version} does not exist on php.net. Please enter a valid version, e.g. 8.3.7")
+                f"PHP version {php_version} is not available for download. Please select a valid version.")
             return False
+
+        self.seven_zip_exe = find_7zip_executable()
+        if not self.seven_zip_exe:
+            self.logger.error(
+                "7-Zip (7z.exe) not found. Please install 7-Zip and ensure it is in your PATH, or installed in a standard location (e.g., C:\\Program Files\\7-Zip).")
+            return False
+        else:
+            self.logger.info(f"Found 7-Zip: {self.seven_zip_exe}")
+
         return True

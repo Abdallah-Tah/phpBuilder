@@ -24,13 +24,17 @@ class PHPBuilder:
             self.command_executor)  # Set command executor
         self.dependency_manager = None
         self._cleanup_paths: Set[Path] = set()
+        self.seven_zip_exe: Optional[str] = None  # Store 7-Zip path
 
     def build(self, config: dict) -> None:
         """Main build process"""
         try:
             # Validate configuration
-            Validator.validate_config(config, {'clone_dir', 'php_version'})
+            Validator.validate_config(
+                config, {'clone_dir', 'php_version', 'seven_zip_exe'})
             Validator.validate_php_version(config['php_version'])
+            # Get 7-Zip path from config
+            self.seven_zip_exe = config['seven_zip_exe']
 
             # Check for essential command-line tools
             if not self.command_executor.is_command_available("git"):
@@ -200,11 +204,11 @@ class PHPBuilder:
 
         self.logger.info("📦 Extracting PHP source...")
         # Check for 7-Zip availability
-        seven_zip_ok = self.command_executor.is_command_available("7z")
-        self.logger.info(f"7z available: {seven_zip_ok}")
-        if not seven_zip_ok:
+        # seven_zip_ok = self.command_executor.is_command_available("7z") # Replaced by direct path
+        # self.logger.info(f"7z available: {seven_zip_ok}")
+        if not self.seven_zip_exe or not Path(self.seven_zip_exe).exists():
             self.logger.error(
-                "7-Zip (7z.exe) is not installed or not found in PATH. It is required to extract PHP source.")
+                "7-Zip (7z.exe) not found or path is invalid. It is required to extract PHP source.")
             # Attempt to use tar as a fallback if on a system that might have it (not Windows by default)
             if os.name != 'nt':
                 self.logger.info(
@@ -226,9 +230,9 @@ class PHPBuilder:
                     "No fallback extraction method available on Windows without 7-Zip.")
                 return False
         else:
+            # Use the provided 7-Zip executable path
             extract_cmd = (
-                f'"C:\\Program Files\\7-Zip\\7z.exe" x "{php_tar_path}" -so | '
-                f'"C:\\Program Files\\7-Zip\\7z.exe" x -si -ttar -o"{php_src_path}"'
+                f'"{self.seven_zip_exe}" x "{php_tar_path}" -so | "{self.seven_zip_exe}" x -si -ttar -o"{php_src_path}"'
             )
             rc, out, err = self.command_executor.run_with_output(
                 extract_cmd, cwd=static_php_path)

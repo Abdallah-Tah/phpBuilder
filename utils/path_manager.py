@@ -1,6 +1,7 @@
 from pathlib import Path
 import os
 from typing import Optional
+import shutil
 
 
 class PathManager:
@@ -81,3 +82,24 @@ class PathManager:
         if self._download_path is None:
             raise RuntimeError("PathManager not initialized")
         return self._download_path
+
+
+def find_7zip_executable():
+    """Finds the 7-Zip executable by checking PATH and common installation directories."""
+    # 1. Check PATH
+    seven_zip_exe = shutil.which('7z')
+    if seven_zip_exe:
+        return seven_zip_exe
+
+    # 2. Check common installation paths (Windows)
+    if os.name == 'nt':
+        common_paths = [
+            os.path.join(os.environ.get("ProgramFiles",
+                         "C:\\Program Files"), "7-Zip", "7z.exe"),
+            os.path.join(os.environ.get("ProgramFiles(x86)",
+                         "C:\\Program Files (x86)"), "7-Zip", "7z.exe")
+        ]
+        for path in common_paths:
+            if os.path.exists(path):
+                return path
+    return None
