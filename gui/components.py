@@ -92,7 +92,7 @@ class BuilderFrame(tk.Frame):
             pass
         # Default/fallback versions (update as needed)
         return [
-            "8.4.0", "8.3.8", "8.3.7", "8.3.6", "8.3.5", "8.3.4", "8.3.3", "8.3.2", "8.3.1", "8.3.0"
+            "8.4.0", "8.3.4", "8.3.3", "8.3.2", "8.3.1", "8.3.0"
         ]
 
     def _validate_inputs(self):
