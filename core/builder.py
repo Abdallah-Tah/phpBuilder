@@ -179,6 +179,12 @@ class PHPBuilder:
                 raise BuildError(
                     "Composer installation failed. Please try running with administrator privileges.")
 
+            # Ensure static-php-cli requirements are fixed (macro, etc.)
+            doctor_cmd = "php bin/spc doctor --auto-fix"
+            self.logger.info(
+                "🔧 Running 'php bin/spc doctor --auto-fix' to fix macro and other requirements...")
+            self.command_executor.run(doctor_cmd, cwd=static_php_path)
+
             if not self._prepare_dependencies(static_php_path, config):
                 raise BuildError("Failed to prepare dependencies")
 

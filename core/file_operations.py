@@ -6,6 +6,7 @@ import ctypes
 from typing import Optional
 from utils.logger import Logger
 from utils.exceptions import FileSystemError
+from utils.path_manager import find_perl_executable
 
 
 class FileOperations:
@@ -45,67 +46,152 @@ class FileOperations:
             return long_path  # Fallback to long path
 
     def patch_perl_shim(self, base_path: Path) -> None:
-        """Patch perl shim for Windows compatibility"""
-        # Attempt to find perl.exe in common Git installations first
-        possible_perl_paths = [
-            Path(os.environ.get("ProgramFiles", "C:\\Program Files")) /
-            "Git" / "usr" / "bin" / "perl.exe",
-            Path(os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")
-                 ) / "Git" / "usr" / "bin" / "perl.exe",
-            Path(os.environ.get("LocalAppData", "")) / "Programs" /
-            "Git" / "usr" / "bin" / "perl.exe"  # User install
-        ]
+        """Patch perl shim for Windows compatibility using find_perl_executable."""
+        # Pass the project's base path to find_perl_executable
+        # Assuming base_path for patch_perl_shim is equivalent to the project_base_path needed by find_perl_executable
+        # If base_path is something like D:\python\custom-php-ext\static-php-cli,
+        # and pkgroot is at D:\python\custom-php-ext\pkgroot, we need to adjust.
+        # Let's assume base_path is the root of the static-php-cli checkout for now.
+        # The find_perl_executable will then look for pkgroot relative to where it expects if this is not the true project root.
+        # For clarity, let's try to get the actual project root if base_path is deep.
+        # Assuming the script is run from project root or base_path is relative to it.
+        # A more robust way would be to have PathManager initialized with project root.
+        # For now, let's assume base_path.parent is the project root if base_path is static-php-cli.
 
-        perl_exe_path_str = ""
-        for p_path in possible_perl_paths:
-            if p_path.exists():
-                perl_exe_path_str = str(p_path)
-                self.logger.info(f"Found perl.exe at: {perl_exe_path_str}")
-                break
+        project_root_for_perl_search = base_path  # Default to base_path
+        if base_path.name == 'static-php-cli':  # Heuristic: if base_path is the static-php-cli dir
+            project_root_for_perl_search = base_path.parent  # Then project root is its parent
 
-        if not perl_exe_path_str:
-            # Fallback to checking PATH if not found in common Git locations
-            if self.command_executor and self.command_executor.is_command_available("perl"):
-                # shutil.which should give us the full path
-                perl_exe_path_str = shutil.which("perl")
-                if perl_exe_path_str:
-                    self.logger.info(
-                        f"Found perl.exe in PATH: {perl_exe_path_str}")
-                else:
-                    self.logger.error(
-                        "Perl executable not found in common Git directories or system PATH. "
-                        "Perl shim cannot be created. Ensure Git for Windows is installed correctly."
-                    )
-                    return  # Cannot proceed without perl
-            else:  # command_executor not available or perl not in PATH
-                self.logger.error(
-                    "Perl executable not found in common Git directories and PATH check could not be performed. "
-                    "Perl shim cannot be created. Ensure Git for Windows is installed correctly."
-                )
-                return
+        actual_perl_path_str = find_perl_executable(
+            project_base_path=project_root_for_perl_search)
 
-        short_perl_path = self.get_short_path(perl_exe_path_str)
-        if short_perl_path == perl_exe_path_str and " " in perl_exe_path_str:
-            self.logger.warning(
-                f"Could not get short path for perl: {perl_exe_path_str}. Using long path. This might cause issues if it contains spaces.")
+        if not actual_perl_path_str:
+            self.logger.error(
+                "Perl executable not found using find_perl_executable. "
+                "Perl setup cannot proceed. Ensure Perl is installed and accessible."
+            )
+            return  # Cannot proceed without perl
 
-        shim = base_path / "perl.bat"
+        self.logger.info(
+            f"Using Perl executable found at: {actual_perl_path_str}")
+
+        shim_dir = base_path
+        shim_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1. Handle perl.exe: Copy the actual perl executable
+        target_perl_exe_path = shim_dir / "perl.exe"
         try:
-            shim.write_text(f'@"{short_perl_path}" %*\\n', encoding='utf-8')
+            target_perl_exe_path.parent.mkdir(parents=True, exist_ok=True)
+            if target_perl_exe_path.exists():
+                target_perl_exe_path.unlink(missing_ok=True)
+            shutil.copy2(actual_perl_path_str, target_perl_exe_path)
             self.logger.info(
-                f"Perl shim created at {shim} pointing to {short_perl_path}")
-            # Update PATH environment variable
-            # Ensure base_path is not already in PATH to avoid duplicates
-            if str(base_path) not in os.environ["PATH"].split(os.pathsep):
-                os.environ["PATH"] = f"{base_path}{os.pathsep}{os.environ['PATH']}"
-                self.logger.info(f"Added {base_path} to PATH for perl.bat.")
-            else:
-                self.logger.info(f"{base_path} already in PATH.")
-        except IOError as e:
-            self.logger.error(f"Failed to write perl shim {shim}: {e}")
+                f"Copied actual Perl executable from {actual_perl_path_str} to {target_perl_exe_path}")
         except Exception as e:
             self.logger.error(
-                f"An unexpected error occurred while creating perl shim: {e}")
+                f"Failed to copy Perl executable from {actual_perl_path_str} to {target_perl_exe_path}: {e}")
+            return
+
+        # 2. Handle perl.bat: Create a batch file that calls the copied perl.exe
+        original_perl_exe_path = Path(actual_perl_path_str)
+        # Try to determine the base 'usr' directory if it's Git Perl (e.g., C:/Program Files/Git/usr)
+        original_perl_usr_path = None
+        if original_perl_exe_path.parent.name.lower() == 'bin' and original_perl_exe_path.parent.parent.name.lower() == 'usr':
+            original_perl_usr_path = original_perl_exe_path.parent.parent
+
+        env_setup_lines = []
+        # Heuristic: if "git" is in the path of the chosen perl, it's likely Git for Windows' Perl.
+        # A more specific check for Git's typical directory structure.
+        if original_perl_usr_path and original_perl_usr_path.parent.name.lower() == 'git':
+            self.logger.info(
+                f"Perl from Git for Windows detected ({actual_perl_path_str}). Attempting to set PERL5LIB in perl.bat shim.")
+            potential_lib_roots = [
+                original_perl_usr_path / "lib" / "perl5",
+                original_perl_usr_path / "share" / "perl5",
+                # Add path for MinGW environments often used by Git for Windows Perl
+                # e.g. C:/Program Files/Git/mingw64/lib/perl5
+                original_perl_exe_path.parent.parent / "lib" / "perl5",
+            ]
+            perl_module_subdirs = ["site_perl", "vendor_perl", "core_perl"]
+            candidate_lib_paths = []
+            for root in potential_lib_roots:
+                for subdir in perl_module_subdirs:
+                    candidate_lib_paths.append(root / subdir)
+        # For Strawberry Perl, the structure is different, e.g., C:\Strawberry\perl\site\lib, C:\Strawberry\perl\vendor\lib, C:\Strawberry\perl\lib
+        if "strawberry" in actual_perl_path_str.lower():
+            self.logger.info(
+                f"Strawberry Perl detected ({actual_perl_path_str}). Attempting to set PERL5LIB in perl.bat shim.")
+            strawberry_root = original_perl_exe_path.parent.parent  # C:\Strawberry\perl
+            candidate_lib_paths.extend([
+                strawberry_root / "site" / "lib",
+                strawberry_root / "vendor" / "lib",
+                strawberry_root / "lib",
+            ])
+
+            existing_lib_paths_str = [
+                str(p.resolve()) for p in candidate_lib_paths if p.exists() and p.is_dir()]
+
+            if existing_lib_paths_str:
+                perl5lib_value = os.pathsep.join(existing_lib_paths_str)
+                # Prepend to existing PERL5LIB to give priority, but also include original
+                env_setup_lines.append(
+                    f'set "SP_ORIGINAL_PERL5LIB=%PERL5LIB%"')
+                env_setup_lines.append(f'set "PERL5LIB={perl5lib_value}"')
+                env_setup_lines.append(
+                    f'if defined SP_ORIGINAL_PERL5LIB (set "PERL5LIB=%PERL5LIB%;%SP_ORIGINAL_PERL5LIB%")')
+                self.logger.info(
+                    f"Perl.bat shim will attempt to set PERL5LIB to: {perl5lib_value} (and append original if exists)")
+            else:
+                self.logger.warning(
+                    f"Could not find expected library directories for the selected Perl at {actual_perl_path_str} to set PERL5LIB.")
+
+        bat_content_lines = ['@echo off']
+        bat_content_lines.extend(env_setup_lines)
+        bat_content_lines.append(f'"%~dp0perl.exe" %*')
+
+        # Ensure lines are clean and join with CRLF
+        processed_lines = [line.strip()
+                           for line in bat_content_lines if line.strip()]
+
+        if not processed_lines:
+            self.logger.error(
+                "Processed lines for perl.bat are empty. Using a default minimal bat content.")
+            # This fallback should ideally not be reached if bat_content_lines is always populated correctly.
+            bat_content = '@echo off\\r\\n"%~dp0perl.exe" %*\\r\\n'
+        else:
+            bat_content = '\\r\\n'.join(processed_lines)
+            # Ensure it always ends with exactly one CRLF
+            if not bat_content.endswith('\\r\\n'):
+                bat_content += '\\r\\n'
+
+        # As a final check, ensure no leading newlines and exactly one trailing CRLF.
+        bat_content = bat_content.lstrip('\\r\\n')
+        if not bat_content.endswith('\\r\\n'):
+            bat_content += '\\r\\n'
+        # Ensure @echo off is the first line if it got stripped
+        if not bat_content.lower().startswith('@echo off'):
+            bat_content = '@echo off\\r\\n' + bat_content
+
+        target_perl_bat_path = shim_dir / "perl.bat"
+        try:
+            # Write in text mode. If bat_content already has the correct \\r\\n,
+            # newline='' ensures Python doesn't do further \\n -> os.linesep translation.
+            target_perl_bat_path.write_text(
+                bat_content, encoding='utf-8', newline='')
+            self.logger.info(
+                f"Perl batch shim created at {target_perl_bat_path} to run {target_perl_exe_path}")
+        except Exception as e:
+            self.logger.error(
+                f"Failed to write perl.bat shim {target_perl_bat_path}: {e}")
+
+        # Update PATH environment variable
+        # Ensure base_path is not already in PATH to avoid duplicates
+        current_path_env = os.environ.get("PATH", "")
+        if str(shim_dir) not in current_path_env.split(os.pathsep):
+            os.environ["PATH"] = f"{shim_dir}{os.pathsep}{current_path_env}"
+            self.logger.info(f"Prepended {shim_dir} to PATH for shims.")
+        else:
+            self.logger.info(f"{shim_dir} already in PATH.")
 
     def patch_functions_quote(self, base_path: Path) -> None:
         """Patch functions.php to fix quoting issues safely and idempotently"""
@@ -150,7 +236,7 @@ class FileOperations:
             self.logger.info(
                 "functions.php already patched or patch not needed.")
 
-    def extract_library(self, base_path: Path, libname: str) -> bool:
+    def extract_library(self, base_path: Path, libname: str, archive_filename_hint: Optional[str] = None) -> bool:
         """Extract a library archive with verification"""
         if not self.command_executor:
             self.logger.error(
@@ -163,12 +249,10 @@ class FileOperations:
         # Clean up existing directory
         if source_dir.exists():
             self.logger.info(f"Removing existing directory: {source_dir}")
-            # Use robust removal
             if not self.remove_directory_robust(source_dir):
                 self.logger.error(
                     f"Failed to remove existing directory {source_dir} before extraction.")
                 return False
-
         try:
             source_dir.mkdir(parents=True, exist_ok=True)
         except OSError as e:
@@ -176,98 +260,100 @@ class FileOperations:
                 f"Failed to create source directory {source_dir}: {e}")
             return False
 
-        # Find archive with glob
-        files = glob.glob(str(downloads_dir / f"{libname}*"))
-        files = sorted(files, key=lambda x: (
-            os.path.isdir(x), -len(x)), reverse=True)
+        archive_to_extract_str: Optional[str] = None
 
-        if not files:
-            self.logger.error(
-                f"[!] Archive or source folder for {libname} not found in downloads.")
-            return False
+        if archive_filename_hint:
+            potential_archive_path = downloads_dir / archive_filename_hint
+            if potential_archive_path.is_file():
+                archive_to_extract_str = str(potential_archive_path)
+                self.logger.info(
+                    f"Using archive hint for {libname}: {archive_to_extract_str}")
+            else:
+                self.logger.warning(
+                    f"Archive hint '{archive_filename_hint}' for {libname} ('{potential_archive_path}') not found or not a file. Will try globbing.")
 
-        archive = files[0]
-        if os.path.isdir(archive):
-            # Copy directory contents using PowerShell
-            if not self.command_executor.run(
-                f'powershell -Command "Copy-Item -Path \'{archive}\\*\' -Destination \'{source_dir}\' -Recurse -Force"'
-            ):
+        if not archive_to_extract_str:
+            self.logger.info(
+                f"No valid archive hint for {libname}. Attempting glob patterns.")
+            glob_patterns_priority = [
+                f"{libname}.tar.gz", f"{libname}.tar.xz", f"{libname}.zip", f"{libname}.tgz",
+                f"{libname}-*.tar.gz", f"{libname}-*.tar.xz", f"{libname}-*.zip", f"{libname}-*.tgz",
+                f"{libname}.*.tar.gz", f"{libname}.*.tar.xz", f"{libname}.*.zip", f"{libname}.*.tgz"
+            ]
+            found_files = []
+            for pattern in glob_patterns_priority:
+                matched = list(downloads_dir.glob(pattern))
+                found_files.extend(p for p in matched if p.is_file())
+            if not found_files:
+                matched = list(downloads_dir.glob(f"{libname}*"))
+                found_files.extend(p for p in matched if p.is_file())
+            if found_files:
+                archive_to_extract_str = str(
+                    sorted(found_files, key=lambda p: str(p.name))[0])
+                self.logger.info(
+                    f"Found archive for {libname} via glob: {archive_to_extract_str}")
+            else:
+                self.logger.error(
+                    f"[!] No archive files found for {libname} via any glob pattern in {downloads_dir}.")
                 return False
-            self.logger.info(f"✔ Copied git-based source for {libname}")
-            return True
 
-        # Archive extraction
+        archive = archive_to_extract_str
+
         try:
             use_7zip = self.command_executor.is_command_available("7z")
-            seven_zip_path = "C:\\\\Program Files\\\\7-Zip\\\\7z.exe"  # Default path
-            if use_7zip:
-                # Attempt to get 7z path if `is_command_available` found it elsewhere
-                sz_which = shutil.which("7z")
-                if sz_which:
-                    seven_zip_path = sz_which
-                self.logger.info(
-                    f"Using 7-Zip for extraction: {seven_zip_path}")
+            seven_zip_path = shutil.which(
+                "7z") or "C:\\Program Files\\7-Zip\\7z.exe"
 
             if archive.endswith(".zip"):
                 if use_7zip:
                     extract_cmd = f'"{seven_zip_path}" x "{archive}" -o"{source_dir}" -y'
-                else:  # Fallback to shutil.unpack_archive
-                    self.logger.info(
-                        f"7-Zip not found. Attempting to extract {archive} using Python\'s shutil.unpack_archive.")
+                    if not self.command_executor.run(extract_cmd):
+                        raise RuntimeError(f"7z extraction failed: {archive}")
+                else:
                     shutil.unpack_archive(str(archive), str(source_dir))
                     self.logger.info(
                         f"Successfully extracted {archive} using shutil.unpack_archive.")
-                    # Flatten after unpack
-                    return self._flatten_single_subdirectory(source_dir)
-            # Added .tar.bz2 and .tar
+                return self._post_extract_verify(source_dir, libname)
+
             elif archive.endswith(('.tar.xz', '.tar.gz', '.tgz', '.tar.bz2', '.tar')):
                 if use_7zip:
                     extract_cmd = (
                         f'"{seven_zip_path}" x "{archive}" -so | '
-                        # Added -y for auto-yes
                         f'"{seven_zip_path}" x -si -ttar -o"{source_dir}" -y'
                     )
-                else:  # Fallback to shutil.unpack_archive
+                    if not self.command_executor.run(extract_cmd):
+                        raise RuntimeError(
+                            f"7z stream extraction failed: {archive}")
                     self.logger.info(
-                        f"7-Zip not found. Attempting to extract {archive} using Python\'s shutil.unpack_archive.")
+                        f"Successfully extracted {archive} using 7-Zip.")
+                else:
                     shutil.unpack_archive(str(archive), str(source_dir))
                     self.logger.info(
                         f"Successfully extracted {archive} using shutil.unpack_archive.")
-                    # Flatten after unpack
-                    return self._flatten_single_subdirectory(source_dir)
+                return self._post_extract_verify(source_dir, libname)
+
             else:
                 self.logger.warning(
-                    f"Unknown archive format for {archive}. Attempting shutil.unpack_archive as a generic fallback.")
-                try:
-                    shutil.unpack_archive(str(archive), str(source_dir))
-                    self.logger.info(
-                        f"Successfully extracted {archive} using shutil.unpack_archive fallback.")
-                    # Flatten after unpack
-                    return self._flatten_single_subdirectory(source_dir)
-                except Exception as e_unpack:
-                    self.logger.error(
-                        f"shutil.unpack_archive also failed for {archive}: {e_unpack}")
-                    raise ValueError(
-                        f"Unknown or unsupported archive format for {archive}")
-
-            if use_7zip:  # Only run command_executor if 7zip was chosen
-                if not self.command_executor.run(extract_cmd):
-                    raise RuntimeError(
-                        f"7z extraction command returned non-zero for {archive}")
-                self.logger.info(
-                    f"Successfully extracted {archive} using 7-Zip.")
-
-            # Flatten any single subdirectory
-            return self._flatten_single_subdirectory(source_dir)
+                    f"Unknown archive format for {archive}. Trying shutil fallback.")
+                shutil.unpack_archive(str(archive), str(source_dir))
+                return self._post_extract_verify(source_dir, libname)
 
         except Exception as e:
             self.logger.error(f"Extraction failed for {archive}: {e}")
-            # Attempt to clean up partially extracted files
             if source_dir.exists():
-                self.logger.info(
-                    f"Cleaning up partially extracted files in {source_dir}")
                 self.remove_directory_robust(source_dir)
             return False
+
+    def _post_extract_verify(self, source_dir: Path, libname: str) -> bool:
+        """Flatten directory and verify if CMakeLists.txt exists for build systems"""
+        flattened = self._flatten_single_subdirectory(source_dir)
+        cmake_file = source_dir / "CMakeLists.txt"
+        if cmake_file.exists():
+            self.logger.info(f"CMakeLists.txt found in {source_dir}.")
+        else:
+            self.logger.warning(
+                f"CMakeLists.txt not found in {source_dir} after extraction of {libname}.")
+        return flattened
 
     def _flatten_single_subdirectory(self, directory: Path) -> bool:
         """
@@ -304,7 +390,6 @@ class FileOperations:
             if path.exists():
                 self.logger.info(
                     f"Attempting to remove directory with shutil.rmtree: {path}")
-                # Initially try with errors not ignored
                 shutil.rmtree(path, ignore_errors=False)
                 self.logger.info(
                     f"Successfully removed directory with shutil.rmtree: {path}")
