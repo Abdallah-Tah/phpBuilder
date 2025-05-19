@@ -130,6 +130,7 @@ class PHPBuilder:
             clone_path = Path(config['clone_dir'])
             static_php_path = clone_path / "static-php-cli"
 
+            # Clone repository if needed
             if not static_php_path.exists():
                 self.logger.info("📦 Cloning static-php-cli...")
                 if not self.command_executor.run(
@@ -138,30 +139,53 @@ class PHPBuilder:
                     raise BuildError("Failed to clone static-php-cli.")
             else:
                 self.logger.info("📂 static-php-cli already exists")
-                for subdir in ["downloads", "source", "build"]:
-                    (static_php_path / subdir).mkdir(parents=True, exist_ok=True)
 
+            # Create necessary directories
+            for subdir in ["downloads", "source", "build"]:
+                (static_php_path / subdir).mkdir(parents=True, exist_ok=True)
+
+            # Run composer install and doctor fix together
+            if not self._run_composer_elevated(static_php_path):
+                raise BuildError(
+                    "Composer installation failed. Please try running with administrator privileges.")
+
+            doctor_cmd = "php bin/spc doctor --auto-fix"
+            self.logger.info(
+                "🔧 Running 'php bin/spc doctor --auto-fix' to fix macro and other requirements...")
+            if not self.command_executor.run(doctor_cmd, cwd=static_php_path):
+                raise BuildError("Failed to run doctor fix")
+
+            # Download dependencies
+            if not self._prepare_dependencies(static_php_path, config):
+                raise BuildError("Failed to prepare dependencies")
+
+            # Now extract all sources after downloads complete
+            import extract_sources
+            self.logger.info("📦 Extracting source files...")
+            extract_sources.main(str(static_php_path))
+            self.logger.info("✅ Source files extracted successfully")
+
+            # Handle patches and micro setup
             self.file_ops.patch_perl_shim(static_php_path)
             self.file_ops.patch_functions_quote(static_php_path)
 
             micro_source = static_php_path / "downloads" / "micro"
             micro_target = static_php_path / "source" / "micro"
+            sapi_micro = static_php_path / "source" / "php-src" / "sapi" / "micro"
+
+            # Handle micro files
             if micro_target.exists():
                 self.file_ops.remove_directory(micro_target)
             micro_target.mkdir(parents=True, exist_ok=True)
-
-            # Also ensure SAPI micro directory exists
-            sapi_micro = static_php_path / "source" / "php-src" / "sapi" / "micro"
             if sapi_micro.exists():
                 self.file_ops.remove_directory(sapi_micro)
             sapi_micro.mkdir(parents=True, exist_ok=True)
 
             if micro_source.exists():
-                # First copy to source/micro
+                # Copy micro files
                 if self.file_ops.copy_directory(micro_source, micro_target):
                     self.logger.info(
                         "✅ Copied micro source files to source/micro")
-                    # Then copy to sapi/micro
                     if self.file_ops.copy_directory(micro_source, sapi_micro):
                         self.logger.info(
                             "✅ Copied micro source files to sapi/micro")
@@ -175,19 +199,7 @@ class PHPBuilder:
                         "❌ Failed to copy micro files to source/micro")
                     raise BuildError("Failed to copy micro files")
 
-            if not self._run_composer_elevated(static_php_path):
-                raise BuildError(
-                    "Composer installation failed. Please try running with administrator privileges.")
-
-            # Ensure static-php-cli requirements are fixed (macro, etc.)
-            doctor_cmd = "php bin/spc doctor --auto-fix"
-            self.logger.info(
-                "🔧 Running 'php bin/spc doctor --auto-fix' to fix macro and other requirements...")
-            self.command_executor.run(doctor_cmd, cwd=static_php_path)
-
-            if not self._prepare_dependencies(static_php_path, config):
-                raise BuildError("Failed to prepare dependencies")
-
+            # Finally run the build
             if not self._build_php(static_php_path, config):
                 raise BuildError("Failed to build PHP")
 

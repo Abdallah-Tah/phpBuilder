@@ -4,6 +4,7 @@ from tkinter import ttk
 import threading
 import requests
 import re
+import os
 from utils.path_manager import find_7zip_executable
 
 
@@ -60,6 +61,36 @@ class BuilderFrame(tk.Frame):
         if folder:
             self.clone_dir.set(folder)
 
+    def _ensure_static_php_directories(self):
+        """Ensure static-php-cli directories exist"""
+        try:
+            clone_dir = self.clone_dir.get()
+            static_php_path = os.path.join(clone_dir, "static-php-cli")
+            source_dir = os.path.join(static_php_path, "source")
+            downloads_dir = os.path.join(static_php_path, "downloads")
+
+            # Create all required directories
+            for directory in [static_php_path, source_dir, downloads_dir]:
+                os.makedirs(directory, exist_ok=True)
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to create directories: {str(e)}")
+            return False
+
+    def _extract_sources(self):
+        try:
+            if not self._ensure_static_php_directories():
+                return False
+
+            import extract_sources
+            self.logger.info("📦 Extracting source files...")
+            extract_sources.main()
+            self.logger.info("✅ Source files extracted successfully")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to extract sources: {str(e)}")
+            return False
+
     def _start_build(self):
         if not self._validate_inputs():
             return
@@ -69,7 +100,7 @@ class BuilderFrame(tk.Frame):
             'mysql': self.var_mysql.get(),
             'sqlsrv': self.var_sqlsrv.get(),
             'php_version': self.php_version_var.get().strip(),
-            'seven_zip_exe': self.seven_zip_exe  # Pass the found 7-Zip path to the builder
+            'seven_zip_exe': self.seven_zip_exe
         }
 
         threading.Thread(
