@@ -470,10 +470,9 @@ class PHPBuilder:
     def _build_php(self, static_php_path: Path, config: dict) -> bool:
         extensions = self._get_extensions(config)
         ext_str = ",".join(sorted(set(extensions)))
-        os.environ["SPC_CONCURRENCY"] = "4"
         self.logger.info(
             f"🏗️ Building PHP {config['php_version']} with extensions...")
-        build_cmd = f'php bin/spc build "{ext_str}" --build-cli'
+        build_cmd = f'SPC_CONCURRENCY=4 php bin/spc build "{ext_str}" --build-cli'
         if not self.command_executor.run(build_cmd, cwd=static_php_path):
             self.logger.error("❌ Build failed")
             self.logger.info("🔍 Retrying build with debug output...")
@@ -500,6 +499,8 @@ class PHPBuilder:
             extensions.extend(["pdo_mysql", "mysqli", "mysqlnd"])
         if config.get('sqlsrv', False):
             extensions.extend(["sqlsrv", "pdo_sqlsrv"])
+        if config.get('pgsql', False):
+            extensions.extend(["pgsql", "pdo_pgsql"])
         return extensions
 
     def _get_libraries(self, config: dict) -> List[str]:
@@ -510,6 +511,8 @@ class PHPBuilder:
         ]
         if config.get('sqlsrv', False):
             libraries.extend(["sqlsrv", "pdo_sqlsrv"])
+        if config.get('pgsql', False):
+            libraries.extend(["postgresql"])
         return libraries
 
     def _run_composer_elevated(self, static_php_path: Path) -> bool:
