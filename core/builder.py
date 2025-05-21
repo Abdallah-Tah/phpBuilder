@@ -24,105 +24,77 @@ class PHPBuilder:
         self.file_ops.set_command_executor(self.command_executor)
         self.dependency_manager = None
         self._cleanup_paths: Set[Path] = set()
-        self.seven_zip_exe: Optional[str] = None
 
-    def extract_tar_archive(self, tar_path: Path, target_path: Path, static_php_path: Path) -> bool:
-        if not self.seven_zip_exe or not Path(self.seven_zip_exe).exists():
-            self.logger.error("7-Zip (7z.exe) not found or path is invalid.")
-            return False
+    def _find_main_source_dir(self, temp_dir: Path, lib_name: str) -> Path:
+        """Find the main source directory in extracted contents"""
+        contents = list(temp_dir.iterdir())
+        for item in contents:
+            if item.is_dir():
+                if item.name == lib_name or item.name.startswith(f"{lib_name}-"):
+                    return item
+        dirs = [d for d in contents if d.is_dir()]
+        if len(dirs) == 1:
+            return dirs[0]
+        return temp_dir
 
+    def extract_tar_archive(self, tar_path: Path, target_path: Path) -> bool: # Removed static_php_path
+        self.logger.info(f"📦 Extracting {tar_path.name} to {target_path}...")
         target_path.mkdir(parents=True, exist_ok=True)
-
-        # Create a temporary directory for extraction
-        temp_dir = static_php_path / "temp_extract"
-        temp_dir.mkdir(exist_ok=True)
-
+        temp_extract_dir = target_path.parent / f"__temp_extract_{target_path.name}"
         try:
-            is_xz = tar_path.suffix.lower() == '.xz'
-            is_tar_xz = tar_path.suffix.lower() == '.xz' and '.tar.' in tar_path.name.lower()
+            if temp_extract_dir.exists():
+                shutil.rmtree(temp_extract_dir)
+            temp_extract_dir.mkdir(parents=True, exist_ok=True)
 
-            if is_tar_xz:
-                # For .tar.xz files, we need to extract in two steps
-                # First, extract the .xz to get the .tar
-                tar_file = temp_dir / tar_path.stem
-                extract_xz_cmd = f'"{self.seven_zip_exe}" x "{tar_path}" -o"{temp_dir}" -y'
-                rc1, out1, err1 = self.command_executor.run_with_output(
-                    extract_xz_cmd, cwd=static_php_path)
-
-                if rc1 != 0:
-                    self.logger.error(f"Failed to extract .xz archive: {err1}")
-                    return False
-
-                # Now extract the .tar
-                if tar_file.exists():
-                    extract_tar_cmd = f'"{self.seven_zip_exe}" x "{tar_file}" -o"{temp_dir}" -y'
-                    rc2, out2, err2 = self.command_executor.run_with_output(
-                        extract_tar_cmd, cwd=static_php_path)
-
-                    if rc2 != 0:
-                        self.logger.error(
-                            f"Failed to extract .tar archive: {err2}")
-                        return False
+            if tar_path.name.endswith(('.tar.gz', '.tgz')):
+                import tarfile
+                with tarfile.open(tar_path, 'r:gz') as tar:
+                    tar.extractall(path=temp_extract_dir)
+            elif tar_path.name.endswith('.tar.xz'):
+                import tarfile
+                with tarfile.open(tar_path, 'r:xz') as tar:
+                    tar.extractall(path=temp_extract_dir)
+            elif tar_path.name.endswith('.tar.bz2'):
+                import tarfile
+                with tarfile.open(tar_path, 'r:bz2') as tar:
+                    tar.extractall(path=temp_extract_dir)
+            elif tar_path.name.endswith('.zip'):
+                import zipfile
+                with zipfile.ZipFile(tar_path, 'r') as zip_ref:
+                    zip_ref.extractall(temp_extract_dir)
             else:
-                # For non-.tar.xz files, extract directly
-                extract_cmd = f'"{self.seven_zip_exe}" x "{tar_path}" -o"{temp_dir}" -y'
-                rc, out, err = self.command_executor.run_with_output(
-                    extract_cmd, cwd=static_php_path)
-
-                if rc != 0:
-                    self.logger.error(f"Failed to extract archive: {err}")
-                    return False
-
-            # Find the extracted content (usually in a single directory)
-            contents = list(temp_dir.iterdir())
-            if not contents:
-                self.logger.error("No files extracted")
+                self.logger.error(f"Unsupported archive format: {tar_path.name}")
                 return False
 
-            # If there's a single directory, use its contents
-            # Look for a directory that matches the library name without version
-            lib_name = tar_path.stem.split('-')[0]
-            matching_dirs = [d for d in contents if d.is_dir(
-            ) and lib_name.lower() in d.name.lower()]
+            lib_name = target_path.name
+            source_dir_in_archive = self._find_main_source_dir(temp_extract_dir, lib_name)
+            self.logger.info(f"Found source directory in archive: {source_dir_in_archive}")
 
-            source_dir = None
-            if matching_dirs:
-                source_dir = matching_dirs[0]
-            elif len(contents) == 1 and contents[0].is_dir():
-                source_dir = contents[0]
-            else:
-                source_dir = temp_dir
+            if target_path.exists():
+                shutil.rmtree(target_path)
+            target_path.mkdir(parents=True, exist_ok=True)
 
-            # Move contents to target directory
-            for item in source_dir.iterdir():
-                dest_path = target_path / item.name
-                if dest_path.exists():
-                    if dest_path.is_dir():
-                        self.file_ops.remove_directory(dest_path)
-                    else:
-                        dest_path.unlink()
-                if item.is_dir():
-                    shutil.copytree(item, dest_path)
+            for item in source_dir_in_archive.iterdir():
+                src_item_path = source_dir_in_archive / item.name
+                dest_item_path = target_path / item.name
+                if src_item_path.is_dir():
+                    shutil.copytree(src_item_path, dest_item_path, dirs_exist_ok=True)
                 else:
-                    shutil.copy2(item, dest_path)
-
+                    shutil.copy2(src_item_path, dest_item_path)
+            self.logger.info(f"✅ Successfully extracted {tar_path.name} to {target_path}")
             return True
-
         except Exception as e:
-            self.logger.error(f"❌ Extraction error: {str(e)}")
+            self.logger.error(f"❌ Extraction error for {tar_path.name}: {str(e)}")
             return False
-
         finally:
-            # Clean up temp directory
-            if temp_dir.exists():
-                self.file_ops.remove_directory(temp_dir)
+            if temp_extract_dir.exists():
+                shutil.rmtree(temp_extract_dir)
 
     def build(self, config: dict) -> None:
         try:
-            Validator.validate_config(
-                config, {'clone_dir', 'php_version', 'seven_zip_exe'})
+            Validator.validate_config(config, {'clone_dir', 'php_version'}) # Removed seven_zip_exe
             Validator.validate_php_version(config['php_version'])
-            self.seven_zip_exe = config['seven_zip_exe']
+            # self.seven_zip_exe assignment removed
 
             if not self.command_executor.is_command_available("git"):
                 raise BuildError("Git is not installed or not found in PATH.")
@@ -159,11 +131,7 @@ class PHPBuilder:
             if not self._prepare_dependencies(static_php_path, config):
                 raise BuildError("Failed to prepare dependencies")
 
-            # Now extract all sources after downloads complete
-            import extract_sources
-            self.logger.info("📦 Extracting source files...")
-            extract_sources.main(str(static_php_path))
-            self.logger.info("✅ Source files extracted successfully")
+            # Removed call to extract_sources.main(str(static_php_path))
 
             # Handle patches and micro setup
             self.file_ops.patch_perl_shim(static_php_path)
@@ -454,12 +422,13 @@ class PHPBuilder:
                     manual_path = self._try_download_library(lib, download_dir)
                     matches = [manual_path] if manual_path else []
 
-            if matches and matches[0]:
+            if matches and matches[0] and matches[0].exists():
                 lib_path = matches[0]
-                extract_path = static_php_path / "source" / lib
-                self.logger.info(f"📦 Extracting {lib} from {lib_path.name}...")
-                if not self.extract_tar_archive(lib_path, extract_path, static_php_path):
-                    self.logger.error(f"❌ Failed to extract {lib}")
+                lib_name_str = str(lib) 
+                extract_path = static_php_path / "source" / lib_name_str
+                self.logger.info(f"📦 Preparing to extract {lib_name_str} from {lib_path.name}...")
+                if not self.extract_tar_archive(lib_path, extract_path): # static_php_path removed
+                    self.logger.error(f"❌ Failed to extract {lib_name_str}")
                     return False
             else:
                 self.logger.error(f"❌ No downloaded archive found for {lib}")
